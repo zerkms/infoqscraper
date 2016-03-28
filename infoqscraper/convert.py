@@ -210,6 +210,95 @@ class Converter(object):
             self.output
         ]
 
+    def _ffmpeg_h264_overlay_demo(self, video, frame_pattern):
+        if len(self.presentation.metadata['demo_timings']) == 0:
+            return self._ffmpeg_h264_overlay(video, frame_pattern)
+
+        def cut_slices():
+            slices = []
+            timings = self.presentation.metadata['demo_timings'][:]
+            if timings[0] != 0:
+                timings.insert(0, 0)
+            timings.append(float('inf'))
+
+            for i, right_range in enumerate(timings[1:]):
+                left_range = timings[i]
+
+                slice_video = os.path.join(self.tmp_dir, "slice-{0:d}.mp4".format(left_range))
+                cmd = [self.ffmpeg, "-v", "error", "-i", video, "-acodec", "copy", "-vcodec", "copy", "-n"]
+                if right_range != float('inf'):
+                    duration = right_range - left_range
+                    cmd += ["-t", str(duration)]
+
+                cmd += ["-ss", str(left_range), slice_video]
+
+                self._run_command(cmd)
+                slices.append(slice_video)
+
+            return slices, timings
+
+        def compress_demo(slice_video, id):
+            video = os.path.join(self.tmp_dir, "video-{0:d}.avi".format(id))
+            cmd = [self.ffmpeg, "-v", "error", "-i", slice_video, "-vf", "scale='if(gt(a,16/9),1280,-1)':'if(gt(a,16/9),-1,720)'",
+                   "-acodec", "libmp3lame", "-ab", "92k",
+                   "-vcodec", "libx264", "-profile:v", "baseline", "-preset", "fast", "-level", "3.0", "-crf", "28",
+                   "-n", video]
+            self._run_command(cmd)
+            return video
+
+        def compress_slides(slice_video, id):
+            video = os.path.join(self.tmp_dir, "video-{0:d}.avi".format(id))
+            # TODO remove hardcoded framerate ov 29.97
+            cmd = [self.ffmpeg, "-v", "error",
+                   "-i", slice_video,
+                   "-f", "image2", "-r", "1", "-s", "hd720", "-start_number", str(id), "-i", frame_pattern,
+                   "-filter_complex",
+                   "".join([
+                       "color=size=1280x720:c=Black [base];",
+                       "[0:v] setpts=PTS-STARTPTS, scale=w=320:h=-1 [speaker];",
+                       "[1:v] setpts=PTS-STARTPTS, scale=w=1280-320:h=-1[slides];",
+                       "[base][slides]  overlay=shortest=1:x=0:y=0 [tmp1];",
+                       "[tmp1][speaker] overlay=shortest=1:x=main_w-320:y=main_h-overlay_h",
+                   ]),
+                   "-r", "29.97",
+                   "-acodec", "libmp3lame", "-ab", "92k",
+                   "-vcodec", "libx264", "-profile:v", "baseline", "-preset", "fast", "-level", "3.0", "-crf", "28",
+                   "-n",
+                   video
+                   ]
+            self._run_command(cmd)
+            return video
+
+        def compress(slices, timings):
+            videos = []
+            for i, right_range in enumerate(timings[1:]):
+                left_range = timings[i]
+
+                if i % 2 == 0:
+                    videos.append(compress_slides(slices[i], left_range))
+                else:
+                    videos.append(compress_demo(slices[i], left_range))
+            return videos
+
+        def concat(videos):
+            playlist = os.path.join(self.tmp_dir, "playlist.txt")
+            with open(playlist, 'w') as playlist_file:
+                for video in videos:
+                    playlist_file.write("file '{0}'\n".format(video))
+
+            return [
+                self.ffmpeg, "-v", "error",
+                "-f", "concat",
+                "-i", playlist,
+                "-c", "copy",
+                "-n",
+                self.output
+            ]
+
+        slices, timings = cut_slices()
+        videos = compress(slices, timings)
+        return concat(videos)
+
     def _assemble(self, audio, frame_pattern):
         if self.type == "legacy":
             cmd = self._ffmpeg_legacy(audio, frame_pattern)
@@ -217,9 +306,14 @@ class Converter(object):
             cmd = self._ffmpeg_h264(audio, frame_pattern)
         elif self.type == "h264_overlay":
             cmd = self._ffmpeg_h264_overlay(audio, frame_pattern)
+        elif self.type == "h264_overlay_demo":
+            cmd = self._ffmpeg_h264_overlay_demo(audio, frame_pattern)
         else:
             raise Exception("Unknown output type %s" % self.type)
 
+        self._run_command(cmd)
+
+    def _run_command(self, cmd):
         try:
             subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
