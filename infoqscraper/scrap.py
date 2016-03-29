@@ -142,6 +142,7 @@ class Presentation(object):
                 timings = re.search("demoTimings\s+=\s+'([^']+)", script.get_text())
                 if timings:
                     return map(int, timings.group(1).split(','))
+            return []
 
         def add_pdf_if_exist(metadata, pres_div):
             # The markup is not the same if authenticated or not

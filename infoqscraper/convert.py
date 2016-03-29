@@ -24,6 +24,7 @@
 
 import errno
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -214,6 +215,16 @@ class Converter(object):
         if len(self.presentation.metadata['demo_timings']) == 0:
             return self._ffmpeg_h264_overlay(video, frame_pattern)
 
+        cmd = [self.ffmpeg, "-i", video]
+        video_details = ""
+        try:
+            subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            video_details = e.output
+
+        fps_match = re.search("\S+(?=\s+tbr)", video_details)
+        fps = float(fps_match.group(0))
+
         def cut_slices():
             slices = []
             timings = self.presentation.metadata['demo_timings'][:]
@@ -239,33 +250,38 @@ class Converter(object):
 
         def compress_demo(slice_video, id):
             video = os.path.join(self.tmp_dir, "video-{0:d}.avi".format(id))
-            cmd = [self.ffmpeg, "-v", "error", "-i", slice_video, "-vf", "scale='if(gt(a,16/9),1280,-1)':'if(gt(a,16/9),-1,720)'",
-                   "-acodec", "libmp3lame", "-ab", "92k",
-                   "-vcodec", "libx264", "-profile:v", "baseline", "-preset", "fast", "-level", "3.0", "-crf", "28",
-                   "-n", video]
+            cmd = [
+                self.ffmpeg, "-v", "error",
+                "-i", slice_video,
+                "-vf", "scale='if(gt(a,16/9),1280,-1)':'if(gt(a,16/9),-1,720)'",
+                "-acodec", "libmp3lame", "-ab", "92k",
+                "-vcodec", "libx264", "-profile:v", "baseline", "-preset", "fast", "-level", "3.0", "-crf", "28",
+                "-n",
+                video
+            ]
             self._run_command(cmd)
             return video
 
         def compress_slides(slice_video, id):
             video = os.path.join(self.tmp_dir, "video-{0:d}.avi".format(id))
-            # TODO remove hardcoded framerate ov 29.97
-            cmd = [self.ffmpeg, "-v", "error",
-                   "-i", slice_video,
-                   "-f", "image2", "-r", "1", "-s", "hd720", "-start_number", str(id), "-i", frame_pattern,
-                   "-filter_complex",
-                   "".join([
-                       "color=size=1280x720:c=Black [base];",
-                       "[0:v] setpts=PTS-STARTPTS, scale=w=320:h=-1 [speaker];",
-                       "[1:v] setpts=PTS-STARTPTS, scale=w=1280-320:h=-1[slides];",
-                       "[base][slides]  overlay=shortest=1:x=0:y=0 [tmp1];",
-                       "[tmp1][speaker] overlay=shortest=1:x=main_w-320:y=main_h-overlay_h",
-                   ]),
-                   "-r", "29.97",
-                   "-acodec", "libmp3lame", "-ab", "92k",
-                   "-vcodec", "libx264", "-profile:v", "baseline", "-preset", "fast", "-level", "3.0", "-crf", "28",
-                   "-n",
-                   video
-                   ]
+            cmd = [
+                self.ffmpeg, "-v", "error",
+                "-i", slice_video,
+                "-f", "image2", "-r", "1", "-s", "hd720", "-start_number", str(id), "-i", frame_pattern,
+                "-filter_complex",
+                "".join([
+                    "color=size=1280x720:c=Black [base];",
+                    "[0:v] setpts=PTS-STARTPTS, scale=w=320:h=-1 [speaker];",
+                    "[1:v] setpts=PTS-STARTPTS, scale=w=1280-320:h=-1[slides];",
+                    "[base][slides]  overlay=shortest=1:x=0:y=0 [tmp1];",
+                    "[tmp1][speaker] overlay=shortest=1:x=main_w-320:y=main_h-overlay_h",
+                ]),
+                "-r", str(fps),
+                "-acodec", "libmp3lame", "-ab", "92k",
+                "-vcodec", "libx264", "-profile:v", "baseline", "-preset", "fast", "-level", "3.0", "-crf", "28",
+                "-n",
+                video
+            ]
             self._run_command(cmd)
             return video
 
@@ -315,7 +331,7 @@ class Converter(object):
 
     def _run_command(self, cmd):
         try:
-            subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+            return subprocess.check_output(cmd, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
             msg = "Failed to create final movie as %s.\n" \
                   "\tCommand: %s\n" \
