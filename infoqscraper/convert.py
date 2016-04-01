@@ -236,12 +236,20 @@ class Converter(object):
                 left_range = timings[i]
 
                 slice_video = os.path.join(self.tmp_dir, "slice-{0:d}.mp4".format(left_range))
-                cmd = [self.ffmpeg, "-v", "error", "-i", video, "-acodec", "copy", "-vcodec", "copy", "-n"]
+                cmd = [
+                    self.ffmpeg, "-v", "error",
+                    "-ss", str(left_range),
+                    "-i", video,
+                    "-acodec", "copy",
+                    "-vcodec", "copy",
+                    "-n"
+                ]
                 if right_range != float('inf'):
                     duration = right_range - left_range
                     cmd += ["-t", str(duration)]
 
-                cmd += ["-ss", str(left_range), slice_video]
+                cmd += ["-avoid_negative_ts", "make_zero", "-fflags", "+genpts"]
+                cmd += [slice_video]
 
                 self._run_command(cmd)
                 slices.append(slice_video)
