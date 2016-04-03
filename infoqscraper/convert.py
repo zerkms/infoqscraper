@@ -223,6 +223,8 @@ class Converter(object):
         fps = float(fps_match.group(0))
 
         timings = self.presentation.metadata['demo_timings'][:]
+        if len(timings) == 0:
+            timings.insert(0, 0)
         if timings[0] != 0:
             timings.insert(0, 0)
         timings.append(float('inf'))
