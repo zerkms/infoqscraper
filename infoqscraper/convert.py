@@ -212,9 +212,6 @@ class Converter(object):
         ]
 
     def _ffmpeg_h264_overlay_demo(self, video, frame_pattern):
-        if len(self.presentation.metadata['demo_timings']) == 0:
-            return self._ffmpeg_h264_overlay(video, frame_pattern)
-
         cmd = [self.ffmpeg, "-i", video]
         video_details = ""
         try:
@@ -225,103 +222,68 @@ class Converter(object):
         fps_match = re.search("\S+(?=\s+tbr)", video_details)
         fps = float(fps_match.group(0))
 
-        def cut_slices():
-            slices = []
-            timings = self.presentation.metadata['demo_timings'][:]
-            if timings[0] != 0:
-                timings.insert(0, 0)
-            timings.append(float('inf'))
+        timings = self.presentation.metadata['demo_timings'][:]
+        if timings[0] != 0:
+            timings.insert(0, 0)
+        timings.append(float('inf'))
 
-            for i, right_range in enumerate(timings[1:]):
-                left_range = timings[i]
+        inputs = []
+        filter_complex = []
+        concat = []
 
-                slice_video = os.path.join(self.tmp_dir, "slice-{0:d}.mp4".format(left_range))
-                cmd = [
-                    self.ffmpeg, "-v", "error",
-                    "-ss", str(left_range),
-                    "-i", video,
-                    "-acodec", "copy",
-                    "-vcodec", "copy",
-                    "-n"
+        for i, right_range in enumerate(timings[1:]):
+            left_range = timings[i]
+            duration = right_range - left_range
+
+            if left_range > 0:
+                inputs += ["-ss", str(left_range)]
+            if right_range != float('inf'):
+                inputs += ["-t", str(duration)]
+            inputs += ["-i", video]
+
+            if i % 2 == 0:
+                inputs += [
+                    "-f", "image2", "-r", "1", "-s", "hd720", "-start_number", str(left_range), "-i", frame_pattern
                 ]
-                if right_range != float('inf'):
-                    duration = right_range - left_range
-                    cmd += ["-t", str(duration)]
+                stream_id = i / 2 * 3
+                filter_complex += [
+                    "[{0:d}:v] setpts=PTS-STARTPTS, scale=w=320:h=-1 [sp-{1:d}];".format(stream_id, i),
+                    "[{0:d}:v] setpts=PTS-STARTPTS, scale=w=1280-320:h=-1[sl-{1:d}];".format(stream_id + 1, i),
+                    "color=size=1280x720:c=Black [b-{0:d}];".format(i),
+                    "[b-{0:d}][sl-{0:d}] overlay=shortest=1:x=0:y=0 [bsl-{0:d}];".format(i),
+                    "[bsl-{0:d}][sp-{0:d}] overlay=shortest=1:x=main_w-320:y=main_h-overlay_h [c-{0:d}];".format(i)
+                ]
+            else:
+                stream_id = i / 2 * 3 + 2
+                filter_complex += [
+                    "[{0:d}:v] scale='if(gt(a,16/9),1280,-1)':'if(gt(a,16/9),-1,720)' [c-{1:d}];".format(stream_id, i)
+                ]
 
-                cmd += ["-avoid_negative_ts", "make_zero", "-fflags", "+genpts"]
-                cmd += [slice_video]
+            concat += ["[c-{0:d}] [{1:d}:a:0]".format(i, stream_id)]
 
-                self._run_command(cmd)
-                slices.append(slice_video)
+        concat += ["concat=n={0:d}:v=1:a=1 [v] [a]".format(len(timings) - 1)]
 
-            return slices, timings
+        filter_script_path = os.path.join(self.tmp_dir, "filter")
+        with open(filter_script_path, 'w') as filter_script_file:
+            filter_script_file.write("\n".join(filter_complex))
+            filter_script_file.write("\n")
+            filter_script_file.write(" ".join(concat))
 
-        def compress_demo(slice_video, id):
-            video = os.path.join(self.tmp_dir, "video-{0:d}.avi".format(id))
-            cmd = [
-                self.ffmpeg, "-v", "error",
-                "-i", slice_video,
-                "-vf", "scale='if(gt(a,16/9),1280,-1)':'if(gt(a,16/9),-1,720)'",
-                "-acodec", "libmp3lame", "-ab", "92k",
-                "-vcodec", "libx264", "-profile:v", "baseline", "-preset", "fast", "-level", "3.0", "-crf", "28",
-                "-n",
-                video
-            ]
-            self._run_command(cmd)
-            return video
+        cmd = [self.ffmpeg, "-v", "error"]
 
-        def compress_slides(slice_video, id):
-            video = os.path.join(self.tmp_dir, "video-{0:d}.avi".format(id))
-            cmd = [
-                self.ffmpeg, "-v", "error",
-                "-i", slice_video,
-                "-f", "image2", "-r", "1", "-s", "hd720", "-start_number", str(id), "-i", frame_pattern,
-                "-filter_complex",
-                "".join([
-                    "color=size=1280x720:c=Black [base];",
-                    "[0:v] setpts=PTS-STARTPTS, scale=w=320:h=-1 [speaker];",
-                    "[1:v] setpts=PTS-STARTPTS, scale=w=1280-320:h=-1[slides];",
-                    "[base][slides]  overlay=shortest=1:x=0:y=0 [tmp1];",
-                    "[tmp1][speaker] overlay=shortest=1:x=main_w-320:y=main_h-overlay_h",
-                ]),
-                "-r", str(fps),
-                "-acodec", "libmp3lame", "-ab", "92k",
-                "-vcodec", "libx264", "-profile:v", "baseline", "-preset", "fast", "-level", "3.0", "-crf", "28",
-                "-n",
-                video
-            ]
-            self._run_command(cmd)
-            return video
+        cmd += inputs
 
-        def compress(slices, timings):
-            videos = []
-            for i, right_range in enumerate(timings[1:]):
-                left_range = timings[i]
+        cmd += [
+            "-filter_complex_script", filter_script_path,
+            "-map", "[v]", "-map", "[a]",
+            "-r", str(fps),
+            "-acodec", "libmp3lame", "-ab", "92k",
+            "-vcodec", "libx264", "-profile:v", "baseline", "-preset", "fast", "-level", "3.0", "-crf", "28",
+            "-n",
+            self.output
+        ]
 
-                if i % 2 == 0:
-                    videos.append(compress_slides(slices[i], left_range))
-                else:
-                    videos.append(compress_demo(slices[i], left_range))
-            return videos
-
-        def concat(videos):
-            playlist = os.path.join(self.tmp_dir, "playlist.txt")
-            with open(playlist, 'w') as playlist_file:
-                for video in videos:
-                    playlist_file.write("file '{0}'\n".format(video))
-
-            return [
-                self.ffmpeg, "-v", "error",
-                "-f", "concat",
-                "-i", playlist,
-                "-c", "copy",
-                "-n",
-                self.output
-            ]
-
-        slices, timings = cut_slices()
-        videos = compress(slices, timings)
-        return concat(videos)
+        return cmd
 
     def _assemble(self, audio, frame_pattern):
         if self.type == "legacy":
